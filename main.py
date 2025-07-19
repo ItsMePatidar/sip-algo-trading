@@ -12,6 +12,7 @@ import logging
 from datetime import datetime, timedelta
 import time
 import signal
+import logging
 
 # Add project root to Python path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -23,7 +24,87 @@ from data.market_data import MarketDataProvider
 from brokers.zerodha_broker import ZerodhaBroker
 from orders.order_manager import OrderManager
 from utils.helpers import setup_logging, is_market_open, calculate_sip_amount
-
+from controls.circuit_breaker import CircuitBreaker, CircuitBreakerConfig, TriggerCondition, TriggerType, CircuitBreakerState
+from controls.emergency_stop import EmergencyStopManager, StopLevel, StopReason
+from controls.manual_override import ManualOverride, OverrideLevel
+logger = logging.getLogger(__name__)
+class SIPTradingSystem:
+    def __init__(self):
+        # ... existing initialization ...
+        
+        # Initialize emergency controls
+        self.setup_emergency_controls()
+    
+    def setup_emergency_controls(self):
+        """Setup emergency control systems"""
+        
+        # 1. Circuit Breaker
+        cb_config = CircuitBreakerConfig(
+            name="main_system_breaker",
+            triggers=[
+                TriggerCondition(TriggerType.PORTFOLIO_LOSS, 0.15, timedelta(minutes=5)),
+                TriggerCondition(TriggerType.DAILY_LOSS, 0.05, timedelta(hours=1)),
+                TriggerCondition(TriggerType.DRAWDOWN_LIMIT, 0.20, timedelta(minutes=10))
+            ],
+            cooldown_period=timedelta(minutes=30),
+            auto_reset=True
+        )
+        self.circuit_breaker = CircuitBreaker(cb_config)
+        
+        # 2. Emergency Stop
+        self.emergency_stop_manager = EmergencyStopManager()
+        self.emergency_stop = self.emergency_stop_manager.register_system("SIP_TRADING")
+        
+        # 3. Manual Override
+        self.manual_override = ManualOverride("SIP_TRADING")
+        self.manual_override.add_user_permission("admin", "Administrator", OverrideLevel.EMERGENCY_CONTROL)
+        # Add callbacks
+        self.circuit_breaker.add_trigger_callback(self._on_circuit_breaker_trigger)
+        self.emergency_stop.add_stop_callback(self._on_emergency_stop)
+        
+        logger.info("Emergency controls initialized successfully")
+    def _on_circuit_breaker_trigger(self, event):
+       """Handle circuit breaker trigger"""
+       logger.critical(f"Circuit breaker triggered: {event.trigger_type.value}")
+       
+       # Stop all trading activities
+       self.stop_all_strategies()
+       
+       # Send alerts
+       self.send_critical_alert(f"Circuit breaker triggered: {event.trigger_type.value}")
+   
+    def _on_emergency_stop(self, stop_event):
+        """Handle emergency stop"""
+        logger.critical(f"Emergency stop activated: {stop_event.reason.value}")
+        
+        # Immediate actions based on stop level
+        if stop_event.level == StopLevel.HARD_STOP:
+            self.cancel_all_pending_orders()
+            self.stop_all_strategies()
+        elif stop_event.level == StopLevel.PANIC_STOP:
+            self.initiate_emergency_liquidation()
+        
+        # Send critical alerts
+        self.send_emergency_alert(stop_event)
+    
+    def check_safety_conditions(self, portfolio_state, market_state, system_state):
+        """Check all safety conditions before trading"""
+        
+        # Check emergency stop
+        if self.emergency_stop.is_stopped:
+            logger.warning("Trading blocked: Emergency stop active")
+            return False
+        
+        # Check circuit breaker
+        should_trigger = self.circuit_breaker.evaluate_conditions(
+            portfolio_state, market_state, system_state
+        )
+        
+        if should_trigger or self.circuit_breaker.state == CircuitBreakerState.TRIGGERED:
+            logger.warning("Trading blocked: Circuit breaker triggered")
+            return False
+        
+        return True
 class SIPTradingSystem:
     """Main SIP Trading System class"""
     
